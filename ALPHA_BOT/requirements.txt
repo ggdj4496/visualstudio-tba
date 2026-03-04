@@ -1,0 +1,9 @@
+pytelegrambotapi==4.9.1
+python-dotenv==1.0.0
+Pillow==10.1.0
+requests==2.31.0
+# Optional local LLMs (uncomment & install if you plan to use them):
+# sentence-transformers==2.2.2
+# llama-cpp-python==0.1.67  # for native LLaMA runtimes (requires native deps)
+# transformers==4.40.0  # only if you plan to run large transformer models locally
+# Note: installing optional packages may require extra system dependencies.

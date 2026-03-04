@@ -1,0 +1,435 @@
+# Proyecto completo de ALPHA_BOT
+
+A continuación se incluye el contenido de todos los archivos principales del
+proyecto, junto con un breve comentario en español sobre cada uno. Copia este
+archivo a tu escritorio o a otra ubicación para tener un respaldo completo.
+
+---
+
+## Estructura de carpetas
+
+```
+ALPHA_BOT/
+├── install.ps1              # Instalador en Powershell para Windows
+├── install.sh               # Instalador en shell para Linux/macOS
+├── main.py                  # Código principal del bot
+├── README.md                # Documentación (completa) del proyecto
+├── requirements.txt         # Dependencias de Python
+├── smoke_test.py            # Prueba rápida de carga de plugins
+├── utils.py                 # Funciones auxiliares y carga de variables de entorno
+├── PROJECT_HISTORY.md       # Historial de desarrollo y notas de respaldo
+├── memory.json              # Archivo de memoria persistente generado por plugin
+├── proyecto_completo.txt    # <-- este archivo
+└── plugins/
+    ├── memory.py            # Plugin de memoria persistente (texto)
+    ├── perchance_sample.py  # Plugin de ejemplo que invierte texto
+    └── __pycache__/         # Archivos compilados en caché
+```
+
+---
+
+## Archivo: `main.py`
+
+(Explicación: arranca el bot de Telegram, gestiona el menú, carga plugins,
+procesa comandos, reinicia, maneja fotos y consolas, y despacha a plugins.)
+
+```
+import os
+import sys
+import logging
+from telebot import TeleBot, types
+from utils import TELEGRAM_TOKEN, is_owner, logger
+
+# Dynamic plugin loader
+from importlib import import_module
+from glob import glob
+import pathlib
+
+PLUGINS = {}
+SESSIONS = {}
+DEBUG_MODE = False
+
+
+def load_plugins():
+    PLUGINS.clear()
+    plugin_files = glob(str(pathlib.Path(__file__).parent / 'plugins' / '*.py'))
+    for p in plugin_files:
+        name = pathlib.Path(p).stem
+        if name.startswith('_'):
+            continue
+        try:
+            mod = import_module(f'plugins.{name}')
+            if hasattr(mod, 'process') and hasattr(mod, 'name'):
+                PLUGINS[mod.name] = mod
+                logger.info(f'Loaded plugin: {mod.name}')
+            else:
+                logger.info(f'Skipped plugin (missing interface): {name}')
+        except Exception as e:
+            logger.exception(f'Failed to load plugin {name}: {e}')
+
+
+def safe_restart():
+    logger.info('Performing safe restart...')
+    python = sys.executable
+    os.execv(python, [python] + sys.argv)
+
+
+def start_bot():
+    if not TELEGRAM_TOKEN:
+        logger.error('No TELEGRAM_TOKEN; aborting bot startup.')
+        return
+
+    bot = TeleBot(TELEGRAM_TOKEN)
+
+    @bot.message_handler(commands=['start'])
+    def send_welcome(m):
+        if not is_owner(m.from_user.id):
+            return
+        markup = types.ReplyKeyboardMarkup(True, row_width=2)
+        markup.add('🎨 Perchance', '📸 Fotox', '💎 Saldo: 1653 CR')
+        # additional control buttons
+        markup.add('⚙️ Ajustes', '🧠 Asimilar', '🖥️ Consola', '🔁 Reiniciar')
+        bot.send_message(m.chat.id, f'🔱 ALPHA CONECTADO', reply_markup=markup)
+
+    @bot.message_handler(func=lambda m: True, content_types=['text', 'photo'])
+    def handle_message(m):
+        if not is_owner(m.from_user.id):
+            return
+        text = (m.text or '').strip()
+        logger.info(f'Received from owner: {text or "<photo>"}')
+
+        if text == '🎨 Perchance':
+            bot.send_message(m.chat.id, 'Selecciona un plugin para ejecutar:', reply_markup=plugin_keyboard())
+            return
+
+        if text == '⚙️ Ajustes':
+            send_settings(m)
+            return
+
+        if text == '🖥️ Consola':
+            bot.send_message(m.chat.id, 'Consola segura: envía `status`, `plugins`, `reload` o `help`.')
+            SESSIONS[m.chat.id] = 'CONSOLE'
+            return
+
+        if text == '🧠 Asimilar':
+            bot.send_message(m.chat.id, 'Asimilar: selecciona plugin o envía texto para que te devuelva la lista.', reply_markup=plugin_keyboard())
+            return
+
+        if text == '🔁 Reiniciar':
+            bot.send_message(m.chat.id, 'Reiniciando...')
+            safe_restart()
+            return
+
+        if text == '📸 Fotox':
+            bot.send_message(m.chat.id, 'Envíame una foto para procesar.')
+            SESSIONS[m.chat.id] = 'FOTO'
+            return
+
+        # Console session
+        if SESSIONS.get(m.chat.id) == 'CONSOLE':
+            handle_console(m, text)
+            return
+
+        # Foto session
+        if SESSIONS.get(m.chat.id) == 'FOTO':
+            SESSIONS.pop(m.chat.id, None)
+            if m.content_type == 'photo' or hasattr(m, 'photo'):
+                try:
+                    file_info = bot.get_file(m.photo[-1].file_id)
+                    downloaded = bot.download_file(file_info.file_path)
+                    from io import BytesIO
+                    from PIL import Image, ImageOps
+                    img = Image.open(BytesIO(downloaded))
+                    img = ImageOps.grayscale(img)
+                    out = BytesIO()
+                    img.save(out, format='PNG')
+                    out.seek(0)
+                    bot.send_photo(m.chat.id, out, caption='Foto procesada: escala de grises')
+                except Exception as e:
+                    logger.exception('Error procesando foto')
+                    bot.send_message(m.chat.id, f'Error procesando foto: {e}')
+            else:
+                bot.send_message(m.chat.id, 'No recibí una foto.')
+            return
+
+        # Plugin selection by special message
+        if text.startswith('PLUGIN:'):
+            plugin_key = text.split(':', 1)[1].strip()
+            plugin = PLUGINS.get(plugin_key)
+            if not plugin:
+                bot.send_message(m.chat.id, f'Plugin {plugin_key} no encontrado.')
+                return
+            bot.send_message(m.chat.id, 'Envíame el texto a asimilar (responderé con el resultado procesado).')
+            SESSIONS[m.chat.id] = plugin_key
+            return
+
+        # If session expects a plugin, process
+        if SESSIONS.get(m.chat.id):
+            current = SESSIONS.pop(m.chat.id)
+            if current in PLUGINS:
+                plugin = PLUGINS.get(current)
+                try:
+                    result = plugin.process(text)
+                except Exception as e:
+                    result = f'Error en plugin: {e}'
+                bot.send_message(m.chat.id, result)
+                return
+
+        # Fallback echo
+        bot.reply_to(m, f'ALPHA recibió: {text or "<non-text>"}')
+
+    def plugin_keyboard():
+        kb = types.ReplyKeyboardMarkup(True, row_width=2)
+        for k in PLUGINS.keys():
+            kb.add(f'PLUGIN:{k}')
+        kb.add('🔙 Volver')
+        return kb
+
+    def send_settings(m):
+        kb = types.ReplyKeyboardMarkup(True, row_width=2)
+        kb.add(f'DEBUG: {str(DEBUG_MODE)}', 'Reload Plugins', 'Show Owner')
+        bot.send_message(m.chat.id, 'Ajustes:', reply_markup=kb)
+
+    def handle_console(m, text):
+        cmd = (text or '').lower()
+        if cmd == 'status':
+            bot.send_message(m.chat.id, f'Plugins loaded: {len(PLUGINS)}')
+            return
+        if cmd == 'plugins':
+            bot.send_message(m.chat.id, 'Plugins: ' + ', '.join(PLUGINS.keys() or ['(none)']))
+            return
+        if cmd == 'reload':
+            load_plugins()
+            bot.send_message(m.chat.id, 'Plugins recargados.')
+            return
+        if cmd == 'help':
+            bot.send_message(m.chat.id, 'Consola comandos: status, plugins, reload, help')
+            return
+        bot.send_message(m.chat.id, 'Comando no reconocido. Envía `help` para ver comandos.')
+
+    load_plugins()
+
+    logger.info('ALPHA bot starting polling...')
+    try:
+        bot.infinity_polling(timeout=20, long_polling_timeout=10)
+    except Exception as e:
+        logger.exception(f'Bot polling stopped: {e}')
+
+
+if __name__ == '__main__':
+    start_bot()
+```
+## Archivo: utils.py
+
+(Explicación: carga las variables de entorno, configura el logger y proporciona la función is_owner.)
+
+
+`python
+
+import os
+import logging
+from dotenv import load_dotenv
+
+load_dotenv()
+
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+OWNER_ID = os.getenv('OWNER_ID')
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+
+logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
+                    format='[%(asctime)s] %(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
+
+if TELEGRAM_TOKEN is None:
+    logger.warning('TELEGRAM_TOKEN is not set. Create a .env file based on .env.example')
+
+# Helper: safe owner check (compare as strings)
+def is_owner(user_id):
+    if OWNER_ID is None:
+        return False
+    return str(user_id) == str(OWNER_ID)
+```
+
+## Archivo: plugins/memory.py
+
+(Plugin de memoria persistente.)
+
+
+```python
+
+"""
+Simple persistent memory plugin. It stores each text message you send while the
+plugin is active into a local file (`memory.json`) and can return the stored
+history or clear it. This makes ALPHA behave like an agent with a record of
+the conversation across restarts.
+
+Usage:
+- Select the plugin via the menu ("PLUGIN:memory").
+- Send any text to have it appended to memory.
+- Send the command `!show` to display stored memory.
+- Send `!clear` to wipe the memory file.
+
+The memory file is stored in the bot directory and is human-readable JSON.
+"""
+
+name = 'memory'
+
+import pathlib
+import json
+
+MEM_FILE = pathlib.Path(__file__).parent.parent / 'memory.json'
+
+
+def load_memory():
+    if MEM_FILE.exists():
+        try:
+            return json.loads(MEM_FILE.read_text('utf-8'))
+        except Exception:
+            return []
+    return []
+
+
+def save_memory(records):
+    MEM_FILE.write_text(json.dumps(records, ensure_ascii=False, indent=2), 'utf-8')
+
+
+def process(text: str) -> str:
+    if not text:
+        return 'Nada que guardar.'
+    if text.strip().lower() == '!show':
+        mem = load_memory()
+        if not mem:
+            return 'La memoria está vacía.'
+        return 'Registro:\n' + '\n'.join(mem)
+    if text.strip().lower() == '!clear':
+        save_memory([])
+        return 'Memoria borrada.'
+    # Append to memory
+    mem = load_memory()
+    mem.append(text)
+    save_memory(mem)
+    return f'Guardado en memoria ({len(mem)} entradas).'
+```
+
+## Archivo: .env.example
+
+```dotenv
+
+# Copy this file to .env and fill in values
+TELEGRAM_TOKEN=your_bot_token_here
+OWNER_ID=5972265370
+# Optional: choose a safe logging level (DEBUG/INFO/WARNING/ERROR)
+LOG_LEVEL=INFO
+```
+
+## Archivo: `requirements.txt`
+
+(Archivo con la lista de dependencias requeridas.)
+
+```text
+pytelegrambotapi==4.9.1
+python-dotenv==1.0.0
+Pillow==10.1.0
+requests==2.31.0
+# Optional local LLMs (uncomment & install if you plan to use them):
+# sentence-transformers==2.2.2
+# llama-cpp-python==0.1.67  # for native LLaMA runtimes (requires native deps)
+# transformers==4.40.0  # only if you plan to run large transformer models locally
+# Note: installing optional packages may require extra system dependencies.
+```
+
+## Archivo: install.sh
+
+```bash
+
+#!/usr/bin/env bash
+set -e
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+echo "Installing ALPHA_BOT into: $ROOT"
+
+python3 -m venv "$ROOT/.venv"
+"$ROOT/.venv/bin/python" -m pip install --upgrade pip
+"$ROOT/.venv/bin/python" -m pip install -r "$ROOT/requirements.txt"
+
+if [ ! -f "$ROOT/.env" ]; then
+  cp "$ROOT/.env.example" "$ROOT/.env"
+  echo ".env created from .env.example — edit it and add your TELEGRAM_TOKEN"
+fi
+
+echo "Installation complete. To run the bot:"
+echo "source $ROOT/.venv/bin/activate"
+echo "python $ROOT/main.py"
+
+```
+
+## Archivo: PROJECT_HISTORY.md
+
+```markdown
+
+# ALPHA_BOT Project History and Backup Notes
+
+This document records the chronological steps taken while creating and
+expanding the ALPHA_BOT project. It can be used as a backup of the process of
+writing files, adding folders, and developing the source code.
+
+The history below includes the initial scaffold, new features, and structural
+changes. It can help you retrace development decisions or replicate the setup
+elsewhere.
+
+---
+
+## Initial Scaffold (early March 2026)
+
+1. Created directory `ALPHA_BOT/`.
+2. Added minimal `README.md` describing purpose and quick start.
+3. Added `requirements.txt` with basic dependencies (`pytelegrambotapi`,
+   `python-dotenv`).
+4. Created `.env.example` with placeholder variables.
+5. Wrote `utils.py` to load environment variables, configure logging, and
+   provide `is_owner()` helper.
+6. Added `plugins/` subdirectory and an example plugin
+   `perchance_sample.py` showing simple text transformation.
+7. Developed `main.py`:
+   - Implemented `motor`-style polling.
+   - Added start handler, message handler, and plugin keyboard.
+   - Implemented simple session state for plugin selection.
+   - Error handling, reload mechanism, and logging.
+8. Added `smoke_test.py` to verify plugin loading.
+
+## Enhancements
+
+9. Expanded `requirements.txt` with utilities (`Pillow`, `requests`) and
+   documented optional local LLM packages.
+10. Upgraded `main.py` with additional menu options:
+    - Settings (`⚙️ Ajustes`), console (`🖥️ Consola`), image processing
+      (`📸 Fotox`), restart functionality.
+    - Added session handling for console commands and photo uploads.
+    - Implemented `safe_restart()` to re-launch the script.
+11. Added `install.ps1` and `install.sh` to automate environment setup.
+12. Added `PROJECT_HISTORY.md` (this file) and enhanced `README.md` with
+    full explanation of features and usage.
+13. Created persistent memory plugin (`plugins/memory.py`) allowing the bot to
+    remember text between sessions.  Updated documentation accordingly.
+14. Wrote instructions for running ALPHA as a permanent agent/service (see
+    README).
+
+## Backup & Versioning
+
+- All file modifications are recorded here and archived via Git if
+  applicable. To back up the project, simply copy the entire `ALPHA_BOT`
+  directory or create a zip/tar archive:
+
+  ```powershell
+  Compress-Archive -Path ALPHA_BOT -DestinationPath ALPHA_BOT_backup.zip
+  ```
+
+  ```bash
+  tar -czf ALPHA_BOT_backup.tar.gz ALPHA_BOT/
+  ```
+
+- Keeping this `PROJECT_HISTORY.md` alongside the source code ensures the
+  writing process is documented even if Git metadata is unavailable.
+
+---
+
+Feel free to append new entries as features are added or modifications made.
