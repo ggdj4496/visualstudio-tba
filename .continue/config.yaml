@@ -1,0 +1,12 @@
+name: visualstudio-tba
+version: 0.0.1
+schema: v1
+
+models:
+  - name: SIGMA
+    provider: gemini
+    model: gemini-2.0-flash
+    apiKey: <YOUR_GEMINI_API_KEY>
+    roles:
+      - chat
+      - edit
