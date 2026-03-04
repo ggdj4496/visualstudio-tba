@@ -1,0 +1,7 @@
+pyTelegramBotAPI
+python-dotenv
+requests
+Pillow
+opencv-python
+numpy
+scikit-image
