@@ -1,0 +1,31 @@
+﻿### SOURCE CODE: GEMS_SIGMA ###
+
+import os, cv2, numpy as np
+from telegram import Update
+from telegram.ext import ApplicationBuilder, MessageHandler, filters
+from utils import process_sigma
+
+# Credencial inyectada directamente
+TOKEN = '8488348575:AAH-Ndkefh_ExampleToken' # Basado en tu lista
+
+async def go(u, c):
+    f = await u.message.photo[-1].get_file()
+    i, o = f"in_{f.file_id}.jpg", f"out_{f.file_id}.svg"
+    await f.download_to_drive(i)
+    process_sigma(i, o)
+    await u.message.reply_document(open(o, 'rb'))
+    for x in [i, o]: os.remove(x) if os.path.exists(x) else None
+
+if __name__ == '__main__':
+    ApplicationBuilder().token(TOKEN).build().add_handler(MessageHandler(filters.PHOTO, go)).run_polling()
+
+import cv2
+def process_sigma(i, o):
+    img = cv2.imread(i)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    th = cv2.adaptiveThreshold(cv2.medianBlur(gray, 5), 255, 1, 1, 11, 2)
+    ct, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    with open(o, 'w') as f:
+        f.write(f'<svg xmlns="http://www.w3.org/2000/svg" width="{img.shape[1]}" height="{img.shape[0]}">')
+        [f.write(f'<path d="M ' + ' '.join([f'{p[0][0]},{p[0][1]}' for p in c]) + ' Z" fill="none" stroke="black"/>') for c in ct if cv2.contourArea(c) > 50]
+        f.write('</svg>')
